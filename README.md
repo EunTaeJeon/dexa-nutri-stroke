@@ -51,4 +51,8 @@ python scripts/make_synthetic_data.py --out synthetic_data.csv
 python scripts/run_experiment.py --data synthetic_data.csv
 ```
 
-Synthetic data are for checking execution and do not reproduce the manuscript results. Individual-level study data are not included. Data access requests should be addressed to the corresponding author, Jin-Man Jung, at dr.jinmanjung@gmail.com.
+Synthetic data are for checking execution and do not reproduce the manuscript results.
+
+## Data availability
+
+Individual-level patient data cannot be shared because of privacy restrictions and the conditions of institutional review board approval, but are available from the corresponding author upon reasonable request.
