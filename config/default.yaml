@@ -1,0 +1,10 @@
+seed: 20240930
+valid_size: 0.4
+n_folds: 10
+n_trials: 50
+missing_threshold: 0.2
+contamination: 0.05
+select_features: true
+min_features: 5
+rfe_step: 0.1
+output_dir: results
