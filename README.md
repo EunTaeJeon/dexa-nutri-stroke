@@ -1,6 +1,6 @@
 # Body composition and nutritional status in stroke outcome prediction
 
-Code accompanying **Machine Learning-Based Prediction of Functional Outcomes in Acute Ischemic Stroke Using Body Composition and Nutritional Status**, by Eun-Tae Jeon, Sang-hun Lee, and Jin-Man Jung.
+Code accompanying **Machine Learning-Based Prediction of Functional Outcomes in Acute Ischemic Stroke Using Body Composition and Nutritional Status**, by Eun-Tae Jeon, Sang-hun Lee, Seo-In Han, Ye-Sol Sim, and Jin-Man Jung.
 
 The manuscript is under review at *Clinical Nutrition* (YCLNU-D-26-00948).
 
