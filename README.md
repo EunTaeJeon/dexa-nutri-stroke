@@ -97,6 +97,31 @@ evaluation under `threshold_comparison` in `comparison.json`. The
 cross-validated AUROC describes development after feature and hyperparameter
 selection. Held-out AUROC is reported separately.
 
+## Interpreting calibrated predictions
+
+Pass the fitted calibrated model and the original predictor columns to
+`dexa_nutri_stroke.interpret.shap_values_for`. Use the development predictors
+as `background` when explaining held-out predictions:
+
+```python
+from dexa_nutri_stroke.interpret import shap_values_for
+
+values, predictors = shap_values_for(
+    fitted_calibrated_model, X_validation, background=X_development, seed=0
+)
+```
+
+Permutation SHAP explains the ensemble's event probability after preprocessing
+and calibration. The mean predicted probability in the background data gives
+the baseline. For each explained row, the baseline plus the sum of the
+contributions equals the ensemble prediction, up to floating-point error.
+All supplied background rows enter the baseline. The same background and seed
+can be passed to `global_importance` and `dependence`. Dependence curves use
+observed feature values on the horizontal axis. If the smoothed curve has
+multiple sign changes or a zero plateau, `inflection_point` returns a missing
+estimate when it cannot identify a unique sign-changing crossing. Its bootstrap
+interval is conditional on the fitted model and resamples with a unique crossing.
+
 ## Data availability
 
 Individual-level patient data cannot be shared because of privacy restrictions and the conditions of institutional review board approval, but are available from the corresponding author upon reasonable request.
