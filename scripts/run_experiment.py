@@ -6,8 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from dexa_nutri_stroke import load_config, run_experiment
-from dexa_nutri_stroke.evaluate import subgroup_table
-from dexa_nutri_stroke.schema import default_schema
+from dexa_nutri_stroke.schema import TOAST_SUBTYPES, default_schema
 
 
 def build_subgroups(valid_df) -> dict[str, np.ndarray]:
@@ -32,7 +31,12 @@ def build_subgroups(valid_df) -> dict[str, np.ndarray]:
     if "dexa_delay_hours" in d:
         groups["DEXA < 48 h"] = d["dexa_delay_hours"] < 48
         groups["DEXA >= 48 h"] = d["dexa_delay_hours"] >= 48
-    return {k: v.to_numpy() for k, v in groups.items()}
+    invalid = d["toast_subtype"].dropna().loc[lambda codes: ~codes.isin(TOAST_SUBTYPES)]
+    if not invalid.empty:
+        raise ValueError("toast_subtype must use study codes 2–6, with unknown codes left missing")
+    for code, label in TOAST_SUBTYPES.items():
+        groups[label] = d["toast_subtype"] == code
+    return {name: mask.to_numpy(dtype=bool, na_value=False) for name, mask in groups.items()}
 
 
 def main() -> None:
@@ -48,20 +52,7 @@ def main() -> None:
         cfg.output_dir = str(args.output)
 
     schema = default_schema(outcome=args.outcome)
-    result = run_experiment(args.data, schema, cfg)
-
-    y = result.dataset.valid[schema.outcome].to_numpy(dtype=int)
-    table = subgroup_table(
-        y,
-        result.models["Clin"].valid_probabilities,
-        result.models["Clin-DEXA-Nutri"].valid_probabilities,
-        build_subgroups(result.dataset.valid),
-        seed=cfg.seed,
-    )
-    if not table.empty and cfg.output_dir:
-        out = Path(cfg.output_dir) / "subgroup_performance.csv"
-        table.to_csv(out, index=False)
-        print(f"[io] subgroup table written to {out}")
+    result = run_experiment(args.data, schema, cfg, subgroups=build_subgroups)
 
     print()
     print(result.summary().to_string(index=False))

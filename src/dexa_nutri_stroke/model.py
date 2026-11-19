@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+from lightgbm import LGBMClassifier
 from sklearn.base import BaseEstimator, ClassifierMixin, clone
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import StratifiedKFold, cross_val_predict
@@ -13,15 +14,6 @@ from sklearn.pipeline import Pipeline
 from .preprocess import build_preprocessor
 
 __all__ = ["SearchSpace", "build_estimator", "tune", "fit_calibrated", "cross_val_probabilities"]
-
-try:
-    from lightgbm import LGBMClassifier
-
-    _HAS_LGBM = True
-except ImportError:
-    from sklearn.ensemble import HistGradientBoostingClassifier
-
-    _HAS_LGBM = False
 
 
 @dataclass(frozen=True)
@@ -44,22 +36,16 @@ def build_estimator(
     contamination: float = 0.05,
 ) -> Pipeline:
     params = dict(params or {})
-    if _HAS_LGBM:
-        defaults = dict(
-            objective="binary",
-            n_estimators=400,
-            random_state=random_state,
-            verbose=-1,
-            n_jobs=-1,
-        )
-        defaults.update(params)
-        clf = LGBMClassifier(**defaults)
-    else:
-        allowed = {"learning_rate", "max_depth"}
-        clf = HistGradientBoostingClassifier(
-            random_state=random_state,
-            **{k: v for k, v in params.items() if k in allowed},
-        )
+    defaults = dict(
+        objective="binary",
+        n_estimators=400,
+        random_state=random_state,
+        verbose=-1,
+        n_jobs=-1,
+        subsample_freq=1 if params.get("subsample", 1.0) < 1.0 else 0,
+    )
+    defaults.update(params)
+    clf = LGBMClassifier(**defaults)
 
     steps = build_preprocessor(
         categorical,
@@ -110,11 +96,7 @@ def tune(
     contamination: float = 0.05,
 ) -> dict:
     space = space or SearchSpace()
-    try:
-        import optuna
-    except ImportError:
-        print("[model] optuna not installed; using default hyperparameters")
-        return {}
+    import optuna
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -138,6 +120,16 @@ def tune(
     return dict(study.best_params)
 
 
+def calibrated_estimator(
+    base: BaseEstimator,
+    *,
+    n_folds: int = 10,
+    seed: int = 0,
+) -> ClassifierMixin:
+    cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
+    return CalibratedClassifierCV(base, method="isotonic", cv=cv, ensemble=True)
+
+
 def fit_calibrated(
     X: pd.DataFrame,
     y: np.ndarray,
@@ -156,7 +148,4 @@ def fit_calibrated(
         missing_threshold=missing_threshold,
         contamination=contamination,
     )
-    cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
-    model = CalibratedClassifierCV(base, method="isotonic", cv=cv)
-    model.fit(X, y)
-    return model
+    return calibrated_estimator(base, n_folds=n_folds, seed=seed).fit(X, y)

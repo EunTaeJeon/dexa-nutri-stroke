@@ -6,6 +6,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from dexa_nutri_stroke.schema import TOAST_SUBTYPES
+
 
 def generate(n: int = 900, seed: int = 0) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
@@ -52,7 +54,7 @@ def generate(n: int = 900, seed: int = 0) -> pd.DataFrame:
     alp = np.clip(rng.normal(78, 28, n), 25, 400)
     ffa = np.clip(rng.lognormal(np.log(600), 0.5, n), 60, 3000)
     homocysteine = np.clip(rng.normal(12, 5, n), 3, 60)
-    toast = rng.choice([1, 2, 3, 4, 5], n, p=[0.22, 0.17, 0.31, 0.06, 0.24])
+    toast = rng.choice(list(TOAST_SUBTYPES), n, p=[0.22, 0.17, 0.31, 0.06, 0.24])
     onset_to_admission = np.clip(rng.lognormal(np.log(9), 1.2, n), 0.2, 200)
     dexa_delay = np.clip(rng.lognormal(np.log(30), 0.8, n), 1, 300)
 
@@ -119,6 +121,9 @@ def generate(n: int = 900, seed: int = 0) -> pd.DataFrame:
         ("crp", 0.06),
     ]:
         df.loc[rng.random(n) < rate, col] = np.nan
+    df["unfavourable_outcome_1y"] = rng.binomial(
+        1, 1.0 / (1.0 + np.exp(-(logit + 0.15)))
+    )
 
     return df
 

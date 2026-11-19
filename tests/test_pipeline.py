@@ -10,7 +10,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from dexa_nutri_stroke.data import Schema, split_once
-from dexa_nutri_stroke.evaluate import auroc_ci, calibration_metrics, delong_test
+from dexa_nutri_stroke.evaluate import (
+    auroc_ci,
+    calibration_metrics,
+    compare_at_thresholds,
+    delong_test,
+    evaluate_model,
+    subgroup_table,
+)
 from dexa_nutri_stroke.model import build_estimator, cross_val_probabilities
 from dexa_nutri_stroke.preprocess import (
     DropHighMissing,
@@ -19,6 +26,7 @@ from dexa_nutri_stroke.preprocess import (
 )
 from dexa_nutri_stroke.schema import default_schema
 from make_synthetic_data import generate
+from run_experiment import build_subgroups
 
 
 @pytest.fixture(scope="module")
@@ -138,3 +146,56 @@ def test_calibration_metrics_on_sharp_predictions():
     cal = calibration_metrics(y, p)
     assert cal.brier < 0.01
     assert cal.ici < 0.05
+
+
+def test_paired_threshold_metrics_use_observed_counts_and_the_right_outcome_class():
+    # Each count represents one (outcome, reference prediction, new prediction) cell.
+    counts = [10, 2, 5, 3, 4, 6, 1, 9]
+    cells = np.repeat(np.arange(8), counts)
+    y, reference, new = cells // 4, (cells // 2) % 2, cells % 2
+    result = compare_at_thresholds(
+        y, reference * 0.6, new * 0.7, threshold_ref=0.6, threshold_new=0.7
+    )
+    models = result["models"]
+    assert models["reference"]["sensitivity"]["estimate"] == 10 / 20
+    assert models["new"]["sensitivity"]["estimate"] == 15 / 20
+    assert models["reference"]["specificity"]["estimate"] == 12 / 20
+    assert models["new"]["specificity"]["estimate"] == 15 / 20
+    assert models["new"]["diagnostic_or"]["estimate"] == 15 * 15 / (5 * 5)
+    assert result["categorical_nri"]["estimate"] == pytest.approx(0.4)
+    tests = result["mcnemar"]
+    assert tests["sensitivity"]["reference_incorrect_new_correct"] == 6
+    assert tests["specificity"]["reference_incorrect_new_correct"] == 5
+    assert tests["sensitivity"]["p_value"] == pytest.approx(0.125)
+    assert tests["specificity"]["p_value"] == pytest.approx(0.453125)
+
+
+def test_threshold_evaluation_does_not_optimize_on_validation_data():
+    y = np.array([0, 0, 1, 1])
+    p = np.array([0.1, 0.4, 0.6, 0.9])
+    assert "threshold" not in evaluate_model(y, p)
+    assert evaluate_model(y, p, threshold=0.8)["sensitivity"] == 0.5
+    result = compare_at_thresholds(y, p, p, threshold_ref=0.8, threshold_new=0.8)
+    assert result["mcnemar"]["sensitivity"]["p_value"] == 1.0
+    assert result["models"]["new"]["diagnostic_or"]["estimate"] is None
+    with pytest.raises(ValueError, match="align"):
+        compare_at_thresholds(y, p[:-1], p, threshold_ref=0.8, threshold_new=0.8)
+
+
+def test_subgroup_family_includes_small_toast_groups(cohort, schema):
+    masks = build_subgroups(cohort)
+    assert len(masks) == 21
+    other = masks["Other determined etiology"]
+    assert 0 < other.sum() < 40
+    y = cohort[schema.outcome].to_numpy()
+    rng = np.random.default_rng(1)
+    table = subgroup_table(
+        y, rng.random(len(y)), rng.random(len(y)), {"Other determined etiology": other}
+    )
+    assert table.loc[0, "n"] == other.sum()
+    assert table.loc[0, "q_value"] == table.loc[0, "p_value"]
+
+
+def test_one_year_default_schema_excludes_followup_pni():
+    assert "pni_followup" in default_schema().full_features
+    assert "pni_followup" not in default_schema("unfavourable_outcome_1y").full_features

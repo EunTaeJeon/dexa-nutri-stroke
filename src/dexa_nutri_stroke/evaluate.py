@@ -15,6 +15,7 @@ __all__ = [
     "continuous_nri",
     "calibration_metrics",
     "operating_point",
+    "compare_at_thresholds",
     "evaluate_model",
     "subgroup_table",
 ]
@@ -74,8 +75,8 @@ def _delong_components(predictions: np.ndarray, y: np.ndarray):
     pos = predictions[:, y == 1]
     neg = predictions[:, y == 0]
     m, n = pos.shape[1], neg.shape[1]
-    if m == 0 or n == 0:
-        raise ValueError("both outcome classes must be present")
+    if min(m, n) < 2:
+        raise ValueError("DeLong variance requires at least two observations per outcome class")
     k = predictions.shape[0]
 
     tx = np.vstack([_midrank(pos[r]) for r in range(k)])
@@ -193,31 +194,124 @@ def calibration_metrics(y: np.ndarray, p: np.ndarray) -> Calibration:
     )
 
 
-def _confusion_metrics(y: np.ndarray, p: np.ndarray, threshold: float) -> dict:
-    y = np.asarray(y, dtype=int)
-    pred = (np.asarray(p, dtype=float) >= threshold).astype(int)
-    tp = int(((pred == 1) & (y == 1)).sum())
-    tn = int(((pred == 0) & (y == 0)).sum())
-    fp = int(((pred == 1) & (y == 0)).sum())
-    fn = int(((pred == 0) & (y == 1)).sum())
+def _ratio(numerator, denominator):
+    return np.divide(
+        numerator, denominator,
+        out=np.full_like(denominator, np.nan, dtype=float),
+        where=denominator != 0,
+    )
 
-    def ratio(a: int, b: int) -> float:
-        return float(a / b) if b else np.nan
 
+def _confusion_metrics(tn, fp, fn, tp) -> dict:
     return {
-        "threshold": float(threshold),
-        "sensitivity": ratio(tp, tp + fn),
-        "specificity": ratio(tn, tn + fp),
-        "ppv": ratio(tp, tp + fp),
-        "npv": ratio(tn, tn + fn),
-        "accuracy": ratio(tp + tn, len(y)),
+        "sensitivity": _ratio(tp, tp + fn),
+        "specificity": _ratio(tn, tn + fp),
+        "ppv": _ratio(tp, tp + fp),
+        "npv": _ratio(tn, tn + fn),
+        "diagnostic_or": _ratio(tp * tn, fp * fn),
+        "accuracy": _ratio(tp + tn, tp + tn + fp + fn),
+    }
+
+
+def _metrics_at_threshold(y: np.ndarray, p: np.ndarray, threshold: float) -> dict:
+    pred = np.asarray(p, dtype=float) >= threshold
+    counts = np.bincount(2 * np.asarray(y, dtype=int) + pred, minlength=4)
+    return {"threshold": float(threshold), **{key: float(value) for key, value in
+            _confusion_metrics(*counts).items()}}
+
+
+def _interval(point, draws) -> dict:
+    defined = draws[np.isfinite(draws)]
+    lower, upper = np.quantile(defined, [0.025, 0.975]) if len(defined) else (None, None)
+    return {
+        "estimate": float(point) if np.isfinite(point) else None,
+        "lower": float(lower) if lower is not None else None,
+        "upper": float(upper) if upper is not None else None,
+        "defined_resamples": len(defined),
+    }
+
+
+def compare_at_thresholds(
+    y: np.ndarray,
+    p_ref: np.ndarray,
+    p_new: np.ndarray,
+    *,
+    threshold_ref: float,
+    threshold_new: float,
+    n_boot: int = 10_000,
+    seed: int = 42,
+) -> dict:
+    """Evaluate paired validation scores using fixed, development-derived cutoffs.
+
+    Outcome and both probabilities must be aligned in the same patient order.
+    The joint count bootstrap is equivalent to resampling those patients together.
+    Undefined ratios (including unbounded diagnostic ORs) are reported as null.
+    """
+    y = np.asarray(y)
+    scores = [np.asarray(p, dtype=float) for p in (p_ref, p_new)]
+    thresholds = (float(threshold_ref), float(threshold_new))
+    if y.ndim != 1 or not np.array_equal(np.unique(y), [0, 1]):
+        raise ValueError("outcomes must be a vector containing both binary classes")
+    for p in scores:
+        if p.shape != y.shape or not np.all(np.isfinite(p) & (p >= 0) & (p <= 1)):
+            raise ValueError("each probability vector must align with outcomes and lie in [0, 1]")
+    if not all(0 <= cutoff <= 1 for cutoff in thresholds):
+        raise ValueError("thresholds must lie in [0, 1]")
+    if n_boot < 1:
+        raise ValueError("n_boot must be positive")
+
+    ref, new = (p >= cutoff for p, cutoff in zip(scores, thresholds))
+    counts = np.bincount(4 * y.astype(int) + 2 * ref + new, minlength=8).reshape(2, 2, 2)
+    rng = np.random.default_rng(seed)
+    draws = rng.multinomial(len(y), counts.ravel() / len(y), size=n_boot).reshape(-1, 2, 2, 2)
+    point_ref = _confusion_metrics(*counts.sum(axis=2).ravel())
+    point_new = _confusion_metrics(*counts.sum(axis=1).ravel())
+    draw_ref = _confusion_metrics(*draws.sum(axis=3).reshape(-1, 4).T)
+    draw_new = _confusion_metrics(*draws.sum(axis=2).reshape(-1, 4).T)
+    metrics = {}
+    for name, cutoff, point, bootstrap in (
+        ("reference", thresholds[0], point_ref, draw_ref),
+        ("new", thresholds[1], point_new, draw_new),
+    ):
+        metrics[name] = {
+            "threshold": cutoff,
+            **{key: _interval(value, bootstrap[key]) for key, value in point.items()},
+        }
+
+    # Sensitivity uses positive calls among events. Specificity uses negative
+    # calls among non-events, so the discordant cells have the opposite order.
+    tests = {}
+    for name, outcome, correct in (("sensitivity", 1, 1), ("specificity", 0, 0)):
+        n01 = int(counts[outcome, 1 - correct, correct])
+        n10 = int(counts[outcome, correct, 1 - correct])
+        tests[name] = {
+            "n": int(counts[outcome].sum()),
+            "reference_incorrect_new_correct": n01,
+            "reference_correct_new_incorrect": n10,
+            "p_value": float(stats.binomtest(n01, n01 + n10).pvalue) if n01 + n10 else 1.0,
+        }
+
+    # Two-category NRI is the sum of the differences in sensitivity and specificity.
+    nri = point_new["sensitivity"] - point_ref["sensitivity"]
+    nri += point_new["specificity"] - point_ref["specificity"]
+    bootstrap_nri = draw_new["sensitivity"] - draw_ref["sensitivity"]
+    bootstrap_nri += draw_new["specificity"] - draw_ref["specificity"]
+    return {
+        "models": metrics,
+        "mcnemar": tests,
+        "categorical_nri": _interval(nri, bootstrap_nri),
+        "bootstrap_resamples": n_boot,
     }
 
 
 def operating_point(y: np.ndarray, p: np.ndarray) -> dict:
     fpr, tpr, thresholds = roc_curve(np.asarray(y, dtype=int), np.asarray(p, dtype=float))
     best = int(np.argmax(tpr - fpr))
-    return _confusion_metrics(y, p, float(thresholds[best]))
+    # ROC's infinite sentinel predicts no events. In a Youden tie, prefer an
+    # attainable probability cutoff before applying the existing ROC order.
+    if not np.isfinite(thresholds[best]):
+        best = 1 + int(np.argmax((tpr - fpr)[1:]))
+    return _metrics_at_threshold(y, p, float(thresholds[best]))
 
 
 def evaluate_model(
@@ -225,7 +319,7 @@ def evaluate_model(
 ) -> dict:
     disc = auroc_ci(y, p, seed=seed)
     cal = calibration_metrics(y, p)
-    point = operating_point(y, p) if threshold is None else _confusion_metrics(y, p, threshold)
+    point = {} if threshold is None else _metrics_at_threshold(y, p, threshold)
     return {**disc.as_dict(), **cal.as_dict(), **point}
 
 
@@ -235,7 +329,7 @@ def subgroup_table(
     p_new: np.ndarray,
     subgroups: dict[str, np.ndarray],
     *,
-    min_size: int = 40,
+    min_size: int = 0,
     seed: int = 0,
 ) -> pd.DataFrame:
     from statsmodels.stats.multitest import multipletests
@@ -243,7 +337,10 @@ def subgroup_table(
     rows = []
     for name, mask in subgroups.items():
         mask = np.asarray(mask, dtype=bool)
-        if mask.sum() < min_size or len(np.unique(y[mask])) < 2:
+        if mask.shape != y.shape:
+            raise ValueError(f"subgroup {name!r} must align with validation outcomes")
+        yy = y[mask]
+        if len(yy) < min_size or min(np.count_nonzero(yy == 0), np.count_nonzero(yy == 1)) < 2:
             continue
         ref = auroc_ci(y[mask], p_ref[mask], n_boot=1000, seed=seed)
         new = auroc_ci(y[mask], p_new[mask], n_boot=1000, seed=seed)

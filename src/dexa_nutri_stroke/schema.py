@@ -8,6 +8,7 @@ __all__ = [
     "NUTRITION",
     "CATEGORICAL",
     "STRATIFY_BY",
+    "TOAST_SUBTYPES",
     "default_schema",
 ]
 
@@ -72,13 +73,21 @@ CATEGORICAL: tuple[str, ...] = (
 
 STRATIFY_BY: tuple[str, ...] = ("male", "diabetes")
 
+TOAST_SUBTYPES = {
+    2: "Large artery disease",
+    3: "Cardioembolism",
+    4: "Small vessel occlusion",
+    5: "Other determined etiology",
+    6: "Undetermined etiology",
+}
+
 
 def default_schema(outcome: str = "unfavourable_outcome_3m") -> Schema:
     return Schema(
         outcome=outcome,
         clinical=CLINICAL,
         body_composition=BODY_COMPOSITION,
-        nutrition=NUTRITION,
+        nutrition=("pni_initial",) if outcome == "unfavourable_outcome_1y" else NUTRITION,
         categorical=CATEGORICAL,
         stratify_by=STRATIFY_BY,
     )

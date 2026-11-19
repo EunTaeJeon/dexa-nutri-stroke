@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -11,14 +12,14 @@ from sklearn.metrics import roc_auc_score
 from .config import ExperimentConfig
 from .data import Dataset, Schema, load_dataset, split_once
 from .evaluate import (
-    continuous_nri,
+    compare_at_thresholds,
     delong_test,
     evaluate_model,
     operating_point,
     subgroup_table,
 )
 from .features import shap_rfe
-from .model import build_estimator, cross_val_probabilities, fit_calibrated, tune
+from .model import build_estimator, calibrated_estimator, cross_val_probabilities, tune
 
 __all__ = ["ModelResult", "ExperimentResult", "run_experiment", "save_results"]
 
@@ -91,25 +92,17 @@ def _fit_one(name: str, ds: Dataset, model_key: str, cfg: ExperimentConfig) -> M
         missing_threshold=cfg.missing_threshold,
         contamination=cfg.contamination,
     )
-    oof = cross_val_probabilities(estimator, X_tr, y_tr, n_folds=cfg.n_folds, seed=cfg.seed)
+    model = calibrated_estimator(estimator, n_folds=cfg.n_folds, seed=cfg.seed)
+    # The outer fold is unseen by both the classifier and the isotonic fit.
+    oof = cross_val_probabilities(model, X_tr, y_tr, n_folds=cfg.n_folds, seed=cfg.seed)
     cv_auroc = float(roc_auc_score(y_tr, oof))
     threshold = float(operating_point(y_tr, oof)["threshold"])
     print(f"[{name}] cross-validated AUROC {cv_auroc:.4f}, threshold {threshold:.4f}")
 
-    model = fit_calibrated(
-        X_tr,
-        y_tr,
-        categorical,
-        params,
-        n_folds=cfg.n_folds,
-        seed=cfg.seed,
-        missing_threshold=cfg.missing_threshold,
-        contamination=cfg.contamination,
-    )
-
+    model.fit(X_tr, y_tr)
     X_va, y_va = ds.xy("valid", model_key)
     p_va = model.predict_proba(X_va[features])[:, 1]
-    metrics = evaluate_model(y_va, p_va, threshold=threshold, seed=cfg.seed)
+    metrics = evaluate_model(y_va, p_va, seed=cfg.seed)
     metrics["cv_auroc"] = cv_auroc
     print(
         f"[{name}] validation AUROC {metrics['auroc']:.3f} "
@@ -132,10 +125,11 @@ def run_experiment(
     schema: Schema,
     cfg: ExperimentConfig,
     *,
-    subgroups: dict[str, np.ndarray] | None = None,
+    subgroups: dict[str, np.ndarray] | Callable[[pd.DataFrame], dict[str, np.ndarray]] | None = None,
 ) -> ExperimentResult:
     df = load_dataset(data_path, schema)
     ds = split_once(df, schema, valid_size=cfg.valid_size, seed=cfg.seed)
+    masks = subgroups(ds.valid) if callable(subgroups) else subgroups
 
     results = {
         "Clin": _fit_one("Clin", ds, "clin", cfg),
@@ -148,18 +142,32 @@ def run_experiment(
 
     comparison = {
         "delong": delong_test(y_va, p_new, p_ref),
-        "nri": continuous_nri(y_va, p_ref, p_new, seed=cfg.seed),
+        "threshold_comparison": compare_at_thresholds(
+            y_va, p_ref, p_new,
+            threshold_ref=results["Clin"].threshold,
+            threshold_new=results["Clin-DEXA-Nutri"].threshold,
+            seed=cfg.seed,
+        ),
     }
+    for result, key in zip(results.values(), ("reference", "new")):
+        threshold_metrics = comparison["threshold_comparison"]["models"][key]
+        result.metrics.update({
+            name: interval["estimate"] for name, interval in threshold_metrics.items()
+            if name != "threshold"
+        })
+        result.metrics["threshold"] = result.threshold
+    p_value = comparison["delong"]["p_value"]
+    p_text = f"{p_value:.4f}" if np.isfinite(p_value) else "NA"
     print(
         f"\n[compare] AUROC {comparison['delong']['auroc_1']:.3f} vs "
         f"{comparison['delong']['auroc_2']:.3f}, "
         f"difference {comparison['delong']['difference']:+.3f}, "
-        f"P = {comparison['delong']['p_value']:.4f}"
+        f"P = {p_text}"
     )
 
     table = None
-    if subgroups:
-        table = subgroup_table(y_va, p_ref, p_new, subgroups, seed=cfg.seed)
+    if masks is not None:
+        table = subgroup_table(y_va, p_ref, p_new, masks, seed=cfg.seed)
 
     result = ExperimentResult(dataset=ds, models=results, comparison=comparison, subgroups=table)
 
@@ -173,8 +181,11 @@ def save_results(result: ExperimentResult, cfg: ExperimentConfig) -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     result.summary().to_csv(out / "model_performance.csv", index=False)
+    comparison = dict(result.comparison)
+    if "delong" in comparison and not np.isfinite(comparison["delong"]["p_value"]):
+        comparison["delong"] = {**comparison["delong"], "p_value": None}
     with open(out / "comparison.json", "w", encoding="utf-8") as f:
-        json.dump(result.comparison, f, indent=2)
+        json.dump(comparison, f, indent=2, allow_nan=False)
     with open(out / "selected_features.json", "w", encoding="utf-8") as f:
         json.dump({k: v.features for k, v in result.models.items()}, f, indent=2)
     with open(out / "hyperparameters.json", "w", encoding="utf-8") as f:
