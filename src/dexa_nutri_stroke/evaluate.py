@@ -33,11 +33,22 @@ class Discrimination:
         return asdict(self)
 
 
+def _validate_scores(y: np.ndarray, *scores: np.ndarray) -> tuple[np.ndarray, list[np.ndarray]]:
+    outcomes = np.asarray(y, dtype=float)
+    if outcomes.ndim != 1 or not np.array_equal(np.unique(outcomes), [0, 1]):
+        raise ValueError("outcomes must be a vector containing both binary classes")
+
+    arrays = [np.asarray(score, dtype=float) for score in scores]
+    for score in arrays:
+        if score.shape != outcomes.shape or not np.isfinite(score).all():
+            raise ValueError("each score vector must align with outcomes and contain finite values")
+    return outcomes.astype(int), arrays
+
+
 def auroc_ci(
     y: np.ndarray, p: np.ndarray, *, n_boot: int = 2000, seed: int = 0, alpha: float = 0.05
 ) -> Discrimination:
-    y = np.asarray(y, dtype=int)
-    p = np.asarray(p, dtype=float)
+    y, (p,) = _validate_scores(y, p)
     point = roc_auc_score(y, p)
 
     rng = np.random.default_rng(seed)
@@ -61,7 +72,7 @@ def _midrank(x: np.ndarray) -> np.ndarray:
     ranks = np.empty(n, dtype=float)
     i = 0
     while i < n:
-        j = i
+        j = i + 1
         while j < n and sorted_x[j] == sorted_x[i]:
             j += 1
         ranks[i:j] = 0.5 * (i + j - 1) + 1
@@ -91,8 +102,8 @@ def _delong_components(predictions: np.ndarray, y: np.ndarray):
 
 
 def delong_test(y: np.ndarray, p1: np.ndarray, p2: np.ndarray) -> dict:
-    y = np.asarray(y, dtype=int)
-    aucs, cov = _delong_components(np.vstack([np.asarray(p1), np.asarray(p2)]), y)
+    y, scores = _validate_scores(y, p1, p2)
+    aucs, cov = _delong_components(np.vstack(scores), y)
     contrast = np.array([[1.0, -1.0]])
     var = (contrast @ cov @ contrast.T).item()
     diff = float(aucs[0] - aucs[1])
@@ -115,9 +126,7 @@ def continuous_nri(
     n_boot: int = 2000,
     seed: int = 0,
 ) -> dict:
-    y = np.asarray(y, dtype=int)
-    p_old = np.asarray(p_old, dtype=float)
-    p_new = np.asarray(p_new, dtype=float)
+    y, (p_old, p_new) = _validate_scores(y, p_old, p_new)
 
     def statistic(yy, po, pn):
         up = pn > po
@@ -247,21 +256,18 @@ def compare_at_thresholds(
     The joint count bootstrap is equivalent to resampling those patients together.
     Undefined ratios (including unbounded diagnostic ORs) are reported as null.
     """
-    y = np.asarray(y)
-    scores = [np.asarray(p, dtype=float) for p in (p_ref, p_new)]
+    y, scores = _validate_scores(y, p_ref, p_new)
     thresholds = (float(threshold_ref), float(threshold_new))
-    if y.ndim != 1 or not np.array_equal(np.unique(y), [0, 1]):
-        raise ValueError("outcomes must be a vector containing both binary classes")
     for p in scores:
-        if p.shape != y.shape or not np.all(np.isfinite(p) & (p >= 0) & (p <= 1)):
-            raise ValueError("each probability vector must align with outcomes and lie in [0, 1]")
+        if not np.all((p >= 0) & (p <= 1)):
+            raise ValueError("probabilities must lie in [0, 1]")
     if not all(0 <= cutoff <= 1 for cutoff in thresholds):
         raise ValueError("thresholds must lie in [0, 1]")
     if n_boot < 1:
         raise ValueError("n_boot must be positive")
 
     ref, new = (p >= cutoff for p, cutoff in zip(scores, thresholds))
-    counts = np.bincount(4 * y.astype(int) + 2 * ref + new, minlength=8).reshape(2, 2, 2)
+    counts = np.bincount(4 * y + 2 * ref + new, minlength=8).reshape(2, 2, 2)
     rng = np.random.default_rng(seed)
     draws = rng.multinomial(len(y), counts.ravel() / len(y), size=n_boot).reshape(-1, 2, 2, 2)
     point_ref = _confusion_metrics(*counts.sum(axis=2).ravel())
@@ -284,11 +290,15 @@ def compare_at_thresholds(
     for name, outcome, correct in (("sensitivity", 1, 1), ("specificity", 0, 0)):
         n01 = int(counts[outcome, 1 - correct, correct])
         n10 = int(counts[outcome, correct, 1 - correct])
+        discordant = n01 + n10
+        p_value = 1.0
+        if discordant:
+            p_value = float(stats.binomtest(n01, discordant, p=0.5, alternative="two-sided").pvalue)
         tests[name] = {
             "n": int(counts[outcome].sum()),
             "reference_incorrect_new_correct": n01,
             "reference_correct_new_incorrect": n10,
-            "p_value": float(stats.binomtest(n01, n01 + n10).pvalue) if n01 + n10 else 1.0,
+            "p_value": p_value,
         }
 
     # Two-category NRI is the sum of the differences in sensitivity and specificity.
@@ -305,7 +315,8 @@ def compare_at_thresholds(
 
 
 def operating_point(y: np.ndarray, p: np.ndarray) -> dict:
-    fpr, tpr, thresholds = roc_curve(np.asarray(y, dtype=int), np.asarray(p, dtype=float))
+    y, (p,) = _validate_scores(y, p)
+    fpr, tpr, thresholds = roc_curve(y, p)
     best = int(np.argmax(tpr - fpr))
     # ROC's infinite sentinel predicts no events. In a Youden tie, prefer an
     # attainable probability cutoff before applying the existing ROC order.

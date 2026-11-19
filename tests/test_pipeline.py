@@ -139,6 +139,19 @@ def test_delong_separates_unequal_models():
     assert out["p_value"] < 0.001
 
 
+@pytest.mark.parametrize(
+    ("outcomes", "scores", "message"),
+    [
+        ([0, 0.5, 1, 1], [0.1, 0.2, 0.7, 0.8], "binary"),
+        ([0, 0, 1, 1], [0.1, np.nan, 0.7, 0.8], "finite"),
+        ([0, 0, 1, 1], [0.1, 0.7, 0.8], "align"),
+    ],
+)
+def test_delong_rejects_invalid_outcomes_and_scores(outcomes, scores, message):
+    with pytest.raises(ValueError, match=message):
+        delong_test(outcomes, scores, [0.1, 0.2, 0.6, 0.9])
+
+
 def test_calibration_metrics_on_sharp_predictions():
     y = np.array([0, 0, 1, 1] * 50)
     p = np.where(y == 1, 0.99, 0.01)
